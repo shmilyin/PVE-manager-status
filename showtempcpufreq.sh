@@ -6,6 +6,8 @@
 sNVMEInfo=true
 #固态和机械硬盘
 sODisksInfo=true
+#网卡信息
+sNetwork=true
 #debug，显示修改后的内容，用于调试
 dmode=false
 
@@ -23,7 +25,7 @@ pvejs=/usr/share/pve-manager/js/pvemanagerlib.js
 plibjs=/usr/share/javascript/proxmox-widget-toolkit/proxmoxlib.js
 
 if ! command -v sensors > /dev/null; then
-	echo 你需要先安装 lm-sensors 和 linux-cpupower，脚本尝试给你自动安装
+	echo 你需要先安装 lm-sensors linux-cpupower 和 ethtool，脚本尝试给你自动安装
 	if apt update ; apt install -y lm-sensors; then 
 		echo lm-sensors 安装成功
 		
@@ -33,9 +35,16 @@ if ! command -v sensors > /dev/null; then
 		else
 			echo -e "linux-cpupower安装失败，可能无法正常获取功耗信息，你可以使用\033[34mapt update ; apt install linux-cpupower && modprobe msr && echo msr > /etc/modules-load.d/turbostat-msr.conf && chmod +s /usr/sbin/turbostat && echo 成功！\033[0m 手动安装"
 		fi
+
+		echo 尝试继续安装ethtool获取功耗信息
+		if apt install -y ethtool;then
+			echo ethtool安装成功
+		else
+			echo -e "ethtool安装失败，可能无法正常获取网卡信息，你可以使用\033[34mapt update ; apt install ethtool && echo 成功！\033[0m 手动安装"
+		fi
 	else
 		echo 脚本自动安装所需依赖失败
-		echo -e "请使用蓝色命令：\033[34mapt update ; apt install -y lm-sensors linux-cpupower && chmod +s /usr/sbin/turbostat && echo 成功！ \033[0m 手动安装后重新运行本脚本"
+		echo -e "请使用蓝色命令：\033[34mapt update ; apt install -y lm-sensors linux-cpupower ethtool && chmod +s /usr/sbin/turbostat && echo 成功！ \033[0m 手动安装后重新运行本脚本"
 		echo 脚本退出
 		exit 1
 	fi
@@ -109,6 +118,7 @@ cat > $contentfornp << 'EOF'
 #modbyshowtempfreq
 
 $res->{thermalstate} = `sensors -A`;
+$res->{ethinfo} = `/usr/bin/ethinfo.sh`;
 $res->{cpuFreq} = `
 	goverf=/sys/devices/system/cpu/cpufreq/policy0/scaling_governor
 	maxf=/sys/devices/system/cpu/cpufreq/policy0/cpuinfo_max_freq
@@ -127,6 +137,36 @@ $res->{cpuFreq} = `
 `;
 EOF
 
+# 添加网卡链接信息 START
+cat > /usr/bin/ethinfo.sh << 'EOF'
+#!/bin/bash
+
+# 获取所有网卡的名称
+#interfaces=$(ifconfig | grep -o '^[a-zA-Z0-9]*' | grep "enp\|eno" | sed '/^lo/d')
+interfaces=$(ip link | grep "enp\|eno" | grep UP | awk -F":" '{print $2}' | tr -d ' ')
+
+# 初始化结果字符串
+result=""
+
+# 遍历所有网卡
+for interface in $interfaces; do
+    # 使用ethtool获取网卡的连接速度
+    speed=$(ethtool $interface 2>/dev/null | grep 'Speed:' | awk '{print $2}')
+    if [ -n "$speed" ]; then
+        # 如果结果字符串非空，则在前面添加逗号
+        if [ -n "$result" ]; then
+            result+=" | "
+        fi
+        # 将速度添加到结果字符串
+        result+="$speed"
+    fi
+done
+
+echo $result
+EOF
+
+chmod +x /usr/bin/ethinfo.sh
+# 添加网卡链接信息 END
 
 
 contentforpvejs=/tmp/.contentforpvejs.tmp
@@ -402,6 +442,22 @@ EOF
 fi
 echo "已添加 $sdi 块SATA固态和机械硬盘"
 
+
+#检测网卡
+echo 检测系统中的网卡链接情况
+if $sNetwork;then
+	cat >> $contentforpvejs << EOF
+    {
+      itemId: 'ethinfo',
+      colspan: 2,
+         printBar: false,
+         title: gettext('网卡速度:'),
+         textField: 'ethinfo',
+   },
+EOF
+fi
+echo "已检测系统中的网卡链接情况"
+
 echo 开始修改nodes.pm文件
 if ! grep -q 'modbyshowtempfreq' $np ;then
 	[ ! -e $np.$pvever.bak ] && cp $np $np.$pvever.bak
@@ -443,7 +499,7 @@ if ! grep -q 'modbyshowtempfreq' $pvejs ;then
 	echo 修改页面高度
 	#统计加了几条
 	addRs=$(grep -c '\$res' $contentfornp)
-	addHei=$(( 28 * addRs))
+	addHei=$(( 28 * (addRs + 1)))
 	$dmode && echo "添加了$addRs条内容,增加高度为:${addHei}px"
 
 
